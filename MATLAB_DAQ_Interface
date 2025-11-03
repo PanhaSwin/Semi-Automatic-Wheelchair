@@ -1,0 +1,110 @@
+%% 
+%% MATLAB BLE-Controlled Wheelchair via Tilt
+clc; clear;
+
+%% 1. Connect to BLE (ESP32 Tilt)
+disp('Scanning for BLE devices...');
+devices = blelist;
+disp(devices);
+
+esp32MAC = "9C9E6E774496";  
+disp(['Connecting to ESP32 with MAC ', esp32MAC, ' ...']);
+b = ble(esp32MAC);  % BLE connection
+
+serviceUUID = "12345678-1234-1234-1234-1234567890ab";
+charUUID    = "abcdefab-1234-1234-1234-abcdefabcdef";
+
+% Get tilt characteristic
+tiltChar = characteristic(b, serviceUUID, charUUID);
+
+tiltMap = ["Flat","Forward","Backward","Left","Right"];
+disp('Connected!');
+
+%% 2. Initialize NI DAQ (Wheelchair Control)
+useNI = true;
+try
+    devicesNI = daqlist("ni");
+
+    if isempty(devicesNI)
+        warning("No National Instruments (NI) DAQ devices found. Running in print-only mode.");
+        useNI = false;
+    else
+        deviceID = devicesNI.DeviceID{1};
+        disp(['Using device: ', deviceID]);
+
+        d = daq("ni");
+        addoutput(d, deviceID, "ao0", "Voltage");
+        addoutput(d, deviceID, "ao1", "Voltage");
+
+        % Set initial neutral voltages
+        write(d, [2.5 2.5]);
+        disp('Initial neutral voltage set: ao0=2.5 V, ao1=2.5 V');
+    end
+catch ME
+    warning('DAQ initialization failed: %s', ME.message);
+    useNI = false;
+end
+
+%% 3. Wait for user "start" input
+disp('System initialized. Wheelchair is in SAFE (Flat-only) mode.');
+disp('Type "start" to begin live tilt control...');
+userInput = "";
+while ~strcmpi(userInput, "start")
+    % Continuously send/hold neutral "Flat" voltages for safety
+    if useNI
+        write(d, [2.5 2.5]);
+    end
+    pause(0.5);  % update every half second
+    userInput = input('', 's');  % check console input
+end
+
+disp('Starting live tilt control loop!');
+
+%% 4. Wheelchair control loop (driven by tilt)
+while true
+    try
+        % ------------------------------
+        % Read tilt code from ESP32
+        % ------------------------------
+        data = read(tiltChar);        % 1-byte tilt code
+        code = double(data);          % Convert to double
+        fprintf('Tilt Status: %s (code %d)\n', tiltMap(code+1), code);
+        
+        % ------------------------------
+        % Map tilt code to NI voltages
+        % ------------------------------
+        ao0_value = 2.5;  % Default neutral
+        ao1_value = 2.5;
+
+        switch code
+            case 0  % Flat -> Stop
+                ao0_value = 2.5; ao1_value = 2.5;
+            case 1  % Forward
+                ao0_value = 2.3; ao1_value = 2.5;
+            case 2  % Backward
+                ao0_value = 2.8; ao1_value = 2.5;
+            case 3  % Left
+                ao0_value = 2.5; ao1_value = 2.9;
+            case 4  % Right
+                ao0_value = 2.5; ao1_value = 2.1;
+            otherwise
+                warning('Unknown tilt code: %d', code);
+                ao0_value = 2.5; ao1_value = 2.5;
+        end
+
+        % ------------------------------
+        % Send voltages OR just print
+        % ------------------------------
+        if useNI
+            write(d, [ao0_value ao1_value]);
+            fprintf('Voltage output sent: ao0=%.2f V, ao1=%.2f V\n', ao0_value, ao1_value);
+        else
+            fprintf('[Print-Only Mode] Would send: ao0=%.2f V, ao1=%.2f V\n', ao0_value, ao1_value);
+        end
+
+    catch ME
+        warning('Error in control loop: %s', ME.message);
+    end
+
+    pause(0.1);  % 100 ms update rate
+end
